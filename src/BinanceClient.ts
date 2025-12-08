@@ -11,7 +11,7 @@ import {
   DerivativesTradingUsdsFutures,
 } from '@binance/derivatives-trading-usds-futures';
 
-import { BehaviorSubject, Subject, timer, EMPTY } from 'rxjs';
+import { BehaviorSubject, Subject, timer, EMPTY, from } from 'rxjs';
 import { mergeMap, retry, catchError, takeUntil } from 'rxjs/operators';
 
 const MAX_RETRIES = 10;
@@ -85,31 +85,38 @@ export class BinanceFuturesClient {
   }
 
   async connect(symbol = 'BTCUSDT', interval = '1m') {
-    if (this._status$.value === 'connecting') return;
+    if (this._status$.value === 'connecting' || this._status$.value === 'connected') {
+      return;
+    }
 
     this._status$.next('connecting');
 
-    timer(0, 5000)
+    const attempt = () => from(this.createConnection(symbol, interval)).pipe(
+      catchError(err => {
+        console.error('Ошибка при подключении:', err);
+        throw err; // важно — пробрасываем ошибку дальше, чтобы retry сработал
+      })
+    );
+
+    attempt()
       .pipe(
-        mergeMap(() => this.createConnection(symbol, interval)),
         retry({
-          count: MAX_RETRIES,
-          delay: (_, i) => {
-            const delay = Math.min(BASE_DELAY * 2 ** i, 60_000);
-            console.warn(`Reconnect attempt ${i + 1}/${MAX_RETRIES} in ${delay}ms`);
+          delay: (error, retryCount) => {
+            const delay = Math.min(1000 * retryCount, 30000);
+            console.warn(`Переподключение #${retryCount} через ${delay}мс...`);
             return timer(delay);
-          },
-        }),
-        catchError(err => {
-          console.error('Connection failed permanently:', err);
-          this._status$.next('disconnected');
-          return EMPTY;
+          }
         }),
         takeUntil(this._destroy$)
       )
-      .subscribe(() => {
-        this._status$.next('connected');
-        console.log('Binance Futures — CONNECTED');
+      .subscribe({
+        next: () => {
+          this._status$.next('connected');
+          console.log('Binance Futures — CONNECTED');
+        },
+        error: () => {
+          this._status$.next('disconnected');
+        }
       });
   }
 
@@ -178,7 +185,11 @@ export class BinanceFuturesClient {
   // ———————————————————————— Методы —————————————————
 
   async enableHedgeMode() {
-    await this.client.restAPI.changePositionMode({ dualSidePosition: 'true' });
+    try {
+      await this.client.restAPI.changePositionMode({ dualSidePosition: 'true' });
+    } catch (e: any) {
+      console.log('Controlled error: ', e)
+    }
   }
 
   async disableHedgeMode() {
@@ -186,29 +197,38 @@ export class BinanceFuturesClient {
   }
 
   async setLeverage(symbol: string, leverage: number) {
-    await this.client.restAPI.changeInitialLeverage({ symbol, leverage });
+    try {
+      await this.client.restAPI.changeInitialLeverage({ symbol, leverage });
+    } catch (e: any) {
+      console.log('Controlled error: ', e)
+    }
   }
 
   private async getCurrentPrice(symbol: string): Promise<number> {
     const data: any = await this.client.restAPI.ticker24hrPriceChangeStatistics({ symbol });
-    return Number(data.data().lastPrice); 
+    const price = await data.data();
+    return parseFloat(price.lastPrice); 
   }
 
   private async getSymbolInfo(symbol: string) {
-    const info: any = await this.client.restAPI.exchangeInformation();
-    const { symbols } = info.data(); 
-    const s = symbols.find((x: any) => x.symbol === symbol);
-    if (!s) throw new Error('Symbol not found');
+    try {
+      const info: any = await this.client.restAPI.exchangeInformation();
+      console.log('info', info)
+      const s = info.symbols.find((x: any) => x.symbol === symbol);
+      if (!s) throw new Error('Symbol not found');
 
-    const lot = s.filters.find((f: any) => f.filterType === 'LOT_SIZE');
-    const price = s.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+      const lot = s.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+      const price = s.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
 
-    return {
-      minQty: Number(lot.minQty),
-      stepSize: Number(lot.stepSize),
-      precision: lot.stepSize.includes('.') ? lot.stepSize.split('.')[1].length : 0,
-      tickSize: Number(price.tickSize),
-    };
+      return {
+        minQty: Number(lot.minQty),
+        stepSize: Number(lot.stepSize),
+        precision: lot.stepSize.split('.')[1]?.length || 0,
+        tickSize: Number(price.tickSize),
+      };
+    } catch (e) {
+      console.log(e)
+    }
   }
 
   async marketOrderByUsd({
@@ -222,22 +242,27 @@ export class BinanceFuturesClient {
     usdAmount: number;
     positionSide?: 'BOTH' | 'LONG' | 'SHORT';
   }) {
-    const price = await this.getCurrentPrice(symbol);
-    const info = await this.getSymbolInfo(symbol);
+    try {
+      const price = await this.getCurrentPrice(symbol);
+      const info: any = await this.getSymbolInfo(symbol);
+      console.log('info', info);
 
-    let qty = usdAmount / price;
-    qty = Math.floor(qty / info.stepSize) * info.stepSize;
-    if (qty < info.minQty) throw new Error('Order too small');
+      let qty = usdAmount / price;
+      qty = Math.floor(qty / info.stepSize) * info.stepSize;
+      if (qty < info.minQty) throw new Error('Order too small');
 
-    const quantity = qty.toFixed(info.precision);
+      const quantity = qty.toFixed(info.precision);
 
-    return this.wsApi.newOrder({
-      symbol,
-      side,
-      type: 'MARKET',
-      quantity,
-      positionSide,
-    });
+      return this.wsApi.newOrder({
+        symbol,
+        side,
+        type: 'MARKET',
+        quantity,
+        positionSide,
+      });
+    } catch(e){
+      console.log('ERROR', e)
+    }
   }
 
   async getKlines(symbol: string, interval: string, limit = 500): Promise<Candle[]> {
@@ -246,7 +271,8 @@ export class BinanceFuturesClient {
         interval: interval as any,
         limit
     });
-    const data: any[] = response.data(); 
+    const data: any[] = await response.data(); 
+    console.log(data);
     return data.map((k: any[]) => ({
       openTime: k[0],
       open: k[1],
@@ -262,19 +288,23 @@ export class BinanceFuturesClient {
   private async updatePositions() {
     try {
       const accResponse: any = await this.client.restAPI.accountInformationV2();
-      const acc: any = accResponse.data();
-      const positions = acc.assets
-        .flatMap((asset: any) => asset.positions)
-        .filter((p: any) => Number(p.positionAmt) !== 0)
-        .map((p: any) => ({
-          symbol: p.symbol,
-          positionAmt: p.positionAmt,
-          entryPrice: p.entryPrice,
-          markPrice: p.markPrice,
-          unrealizedPnL: p.unrealizedProfit,
-          leverage: p.leverage,
-          positionSide: p.positionSide as Position['positionSide'],
-        }));
+      const acc: any = await accResponse.data();
+
+      // ✅ ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ #1: acc.positions — это уже массив позиций.
+      const positions = Array.isArray(acc.positions)
+        ? acc.positions
+            .filter((p: any) => Number(p.positionAmt) !== 0)
+            .map((p: any) => ({
+                symbol: p.symbol,
+                positionAmt: p.positionAmt,
+                entryPrice: p.entryPrice,
+                markPrice: p.markPrice,
+                unrealizedPnL: p.unrealizedProfit,
+                leverage: p.leverage,
+                positionSide: p.positionSide as Position['positionSide'],
+            }))
+        : []; 
+
       this._positions$.next(positions);
     } catch (e) {
       console.warn('Failed to update positions', e);

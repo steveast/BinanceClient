@@ -50,17 +50,17 @@ async function startTradingClient() {
     });
 
   // Подписка на изменение позиций
-  client.positions$.subscribe(positions => {
-    if (positions.length > 0) {
-      console.log(`\n[POSITIONS] Обновление (${positions.length} активных позиций):`);
-      positions.forEach(p => {
-        console.log(`  - ${p.symbol}: ${p.positionAmt} (PNL: ${parseFloat(p.unrealizedPnL).toFixed(2)}) @ ${p.entryPrice}`);
-      });
-      console.log('--------------------');
-    } else {
-      console.log('[POSITIONS] Нет активных позиций.');
-    }
-  });
+  // client.positions$.subscribe(positions => {
+  //   if (positions.length > 0) {
+  //     console.log(`\n[POSITIONS] Обновление (${positions.length} активных позиций):`);
+  //     positions.forEach(p => {
+  //       console.log(`  - ${p.symbol}: ${p.positionAmt} (PNL: ${parseFloat(p.unrealizedPnL).toFixed(2)}) @ ${p.entryPrice}`);
+  //     });
+  //     console.log('--------------------');
+  //   } else {
+  //     console.log('[POSITIONS] Нет активных позиций.');
+  //   }
+  // });
 
 
   // ——————————— 2. Установление соединения и выполнение команд ———————————
@@ -77,17 +77,17 @@ async function startTradingClient() {
     }
     
     // 1. Настройка режима (Если не хотите хеджировать, пропустите)
-    // await client.enableHedgeMode(); 
-    // console.log(`[CONFIG] Режим хеджирования включен.`);
+    await client.enableHedgeMode(); 
+    console.log(`[CONFIG] Режим хеджирования включен.`);
 
     // 2. Установка плеча
     await client.setLeverage(SYMBOL, LEVERAGE);
     console.log(`[CONFIG] Установлено плечо ${LEVERAGE}x для ${SYMBOL}.`);
 
     // 3. Получение исторических данных
-    const klines = await client.getKlines(SYMBOL, '1h', 5);
-    console.log(`\n[REST] Получены последние 5 свечей ${SYMBOL} (1h):`);
-    klines.forEach(k => console.log(`  - ${new Date(k.openTime).toLocaleDateString()}: ${k.close}`));
+    // const klines = await client.getKlines(SYMBOL, '1h', 5);
+    // console.log(`\n[REST] Получены последние 5 свечей ${SYMBOL} (1h):`);
+    // klines.forEach(k => console.log(`  - ${new Date(k.openTime).toLocaleDateString()}: ${k.close}`));
 
 
     // 4. Размещение рыночного ордера
@@ -99,16 +99,17 @@ async function startTradingClient() {
       usdAmount: USD_AMOUNT,
       positionSide: 'BOTH',
     });
+    console.log('orderResult', orderResult)
     console.log(`[ORDER] Ордер исполнен. ID: ${orderResult.data().orderId}`);
 
     // Ждем обновления позиций через UserData Stream
-    await sleep(3000);
+    // await sleep(3000);
     
-    // 5. Закрытие позиции (через 10 секунд, чтобы успеть проверить)
-    await sleep(10000);
-    console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
-    await client.closePosition(SYMBOL, 'BOTH');
-    console.log('[ORDER] Позиция отправлена на закрытие.');
+    // // 5. Закрытие позиции (через 10 секунд, чтобы успеть проверить)
+    // await sleep(10000);
+    // console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
+    // await client.closePosition(SYMBOL, 'BOTH');
+    // console.log('[ORDER] Позиция отправлена на закрытие.');
 
   } catch (error) {
     console.error('❌ ПРОИЗОШЛА КРИТИЧЕСКАЯ ОШИБКА В РАБОТЕ КЛИЕНТА:', error);
