@@ -105,34 +105,44 @@ async function startTradingClient() {
     // await client.forceClosePosition(SYMBOL, 'LONG');
 
     const price = 95000;
-    await client.limitOrder({
+    const limitOrder = await client.limitOrder({
       symbol: 'BTCUSDT',
       side: 'SELL',
       usdAmount: 800,
       price,
       positionSide: 'SHORT',
     });
-    // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
-    await client.limitOrderStrategy({
-      symbol: 'BTCUSDT',
-      side: 'BUY',
-      usdAmount: 1000,
-      entryPrice: 60000,
-      stopLoss: 59500,
-      takeProfit: 105000,
-      positionSide: 'LONG',  // ← обязательно на тестнете!
-    });
+    console.log(limitOrder.data.orderId);
+    await sleep(3000);
 
-    // Шорт от текущей цены -3%
-    await client.limitOrderStrategy({
+    await client.modifyLimitOrder({
       symbol: 'BTCUSDT',
       side: 'SELL',
-      usdAmount: 800,
-      entryPrice: 110000,
-      stopLoss: 115000,
-      takeProfit: 80000,
-      positionSide: 'SHORT',
+      orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
+      newPrice: 105000,                         // опционально — можно изменить объём
+      qty: 800,
     });
+    // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
+    // await client.limitOrderStrategy({
+    //   symbol: 'BTCUSDT',
+    //   side: 'BUY',
+    //   usdAmount: 1000,
+    //   entryPrice: 60000,
+    //   stopLoss: 59500,
+    //   takeProfit: 105000,
+    //   positionSide: 'LONG',  // ← обязательно на тестнете!
+    // });
+
+    // // Шорт от текущей цены -3%
+    // await client.limitOrderStrategy({
+    //   symbol: 'BTCUSDT',
+    //   side: 'SELL',
+    //   usdAmount: 800,
+    //   entryPrice: 110000,
+    //   stopLoss: 115000,
+    //   takeProfit: 80000,
+    //   positionSide: 'SHORT',
+    // });
 
   } catch (error) {
     console.error('❌ ПРОИЗОШЛА КРИТИЧЕСКАЯ ОШИБКА В РАБОТЕ КЛИЕНТА:', error);

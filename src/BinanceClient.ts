@@ -504,6 +504,76 @@ export class BinanceFuturesClient {
   }
 
   /**
+ * Изменяет существующий лимитный ордер (цена и/или размер позиции).
+ * Размер позиции указывается в USD (USDT) — как и в marketOrderByUsd / limitOrderStrategy.
+ *
+ * Особенности:
+ *  • qty — это сумма в долларах (USDT), а не количество контрактов
+ *  • Автоматически округляет количество до stepSize и precision символа
+ *  • quantity всегда передаётся (обязательный параметр modifyOrder)
+ *  • Работает через REST API — надёжно и без лишних запросов
+ *
+ * Важно:
+ *  • Ордер должен существовать и быть в статусе NEW/PARTIALLY_FILLED
+ *  • Изменение размера может быть ограничено лимитами позиции (leverage/tier)
+ *
+ * @param symbol           Торговый символ (например "BTCUSDT")
+ * @param orderId          ID ордера (если известен)
+ * @param newPrice         Новая цена лимитного ордера
+ * @param qty              Новый размер позиции в USD (USDT)
+ * @param side             Направление ордера: 'BUY' или 'SELL'
+ *
+ * @returns Ответ Binance с обновлёнными данными ордера
+ *
+ * @example
+ * // Подтянуть лимитный ордер и увеличить позицию до 2500$
+ * await client.modifyLimitOrder({
+ *   symbol: 'BTCUSDT',
+ *   orderId: 123456789,
+ *   side: 'BUY',
+ *   newPrice: 60250,
+ *   qty: 2500
+ * });
+ */
+  async modifyLimitOrder({
+    symbol,
+    orderId,
+    newPrice,
+    qty: qtyInUsd,
+    side,
+  }: {
+    symbol: string;
+    orderId?: number;
+    newPrice: number;
+    qty: number;           // ← размер в USD (USDT)
+    side: 'BUY' | 'SELL';
+  }) {
+    const info = await this.getSymbolInfo(symbol);
+
+    let qty = qtyInUsd / newPrice;
+    qty = Math.floor(qty / info.stepSize) * info.stepSize;
+    if (qty < info.minQty) {
+      throw new Error(`Новый объём слишком мал: ${qty} < ${info.minQty} (${symbol})`);
+    }
+
+    const quantity = qty.toFixed(info.precision);
+    const payload: any = {
+      symbol,
+      side,
+      type: 'LIMIT',
+      price: newPrice.toFixed(info.precision || 1),
+      quantity,
+    };
+
+    if (orderId) payload.orderId = orderId;
+
+    const resp = await this.client.restAPI.modifyOrder(payload);
+    const data = await resp.data();
+
+    return data;
+  }
+
+  /**
  * Устанавливает полноценную стратегию: лимитный вход + стоп-лосс + тейк-профит.
  * Полностью рабочая версия под Binance Futures USDS-M после миграции Algo Order API (9 декабря 2025).
  *
