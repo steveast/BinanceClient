@@ -395,7 +395,7 @@ export class BinanceFuturesClient {
  *   positionSide: 'LONG'  // ← обязательно на тестнете!
  * });
  */
-  async marketOrderByUsd({
+  async marketOrder({
     symbol,
     side,
     usdAmount,
@@ -448,8 +448,6 @@ export class BinanceFuturesClient {
         type: 'MARKET',
         quantity,              // ← строка с правильной точностью
         positionSide,          // ← критично! На тестнете только 'LONG'/'SHORT'
-        // reduceOnly: false,  // можно добавить, если нужно (по умолчанию false)
-        // newClientOrderId:   // опционально, для своего ID
       });
 
       return orderResponse;
@@ -472,6 +470,153 @@ export class BinanceFuturesClient {
       // Пробрасываем дальше, чтобы caller мог обработать
       throw error;
     }
+  }
+
+  async limitOrder({
+    symbol,
+    side,
+    usdAmount,
+    price,
+    positionSide = this.testnet ? 'LONG' : 'BOTH',
+  }: {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    usdAmount: number;
+    price: number;
+    positionSide?: 'LONG' | 'SHORT' | 'BOTH';
+  }) {
+    const info = await this.getSymbolInfo(symbol);
+    let qty = usdAmount / price;
+    qty = Math.floor(qty / info.stepSize) * info.stepSize;
+    if (qty < info.minQty) throw new Error('Ордер слишком мал');
+
+    const quantity = qty.toFixed(info.precision);
+
+    return this.wsApi.newOrder({
+      symbol,
+      side,
+      type: 'LIMIT',
+      timeInForce: 'GTC',
+      quantity,
+      price: price.toFixed(info.precision === 0 ? 1 : info.precision),
+      positionSide,
+    });
+  }
+
+  /**
+ * Устанавливает полноценную стратегию: лимитный вход + стоп-лосс + тейк-профит.
+ * Полностью рабочая версия под Binance Futures USDS-M после миграции Algo Order API (9 декабря 2025).
+ *
+ * Особенности:
+ *   • positionSide — только 'LONG' или 'SHORT' (соответствует Hedge Mode)
+ *   • SL и TP создаются через newAlgoOrder → нет ошибки -4120
+ *   • Все обязательные поля Algo API: triggerPrice, workingType, quantity как number
+ *   • reduceOnly не передаётся — не работает при предустановке SL/TP
+ *   • Лимитный ордер через WebSocket API — максимальная скорость
+ *   • Автоматическое округление до stepSize и precision
+ *
+ * @param symbol        Торговый символ (например "BTCUSDT")
+ * @param side          Направление входа: 'BUY' = LONG, 'SELL' = SHORT
+ * @param usdAmount     Размер позиции в USDT
+ * @param entryPrice    Цена лимитного ордера
+ * @param stopLoss      Цена срабатывания стоп-лосса
+ * @param takeProfit    Цена срабатывания тейк-профита
+ * @param positionSide  Сторона позиции: 'LONG' или 'SHORT'
+ *
+ * @returns Объект с ID всех созданных ордеров и параметрами
+ *
+ * @example
+ * await client.limitOrderStrategy({
+ *   symbol: 'BTCUSDT',
+ *   side: 'BUY',
+ *   usdAmount: 1000,
+ *   entryPrice: 60000,
+ *   stopLoss: 59400,
+ *   takeProfit: 61200,
+ *   positionSide: 'LONG'
+ * });
+ */
+  async limitOrderStrategy({
+    symbol,
+    side,
+    usdAmount,
+    entryPrice,
+    stopLoss,
+    takeProfit,
+    positionSide = side === 'BUY' ? 'LONG' : 'SHORT',
+  }: {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    usdAmount: number;
+    entryPrice: number;
+    stopLoss: number;
+    takeProfit: number;
+    positionSide: 'LONG' | 'SHORT';
+  }) {
+    const info = await this.getSymbolInfo(symbol);
+
+    let qty = usdAmount / entryPrice;
+    qty = Math.floor(qty / info.stepSize) * info.stepSize;
+    if (qty < info.minQty) throw new Error(`Ордер слишком мал: ${qty} < ${info.minQty}`);
+
+    const quantityStr = qty.toFixed(info.precision);
+    const quantityNum = Number(quantityStr);
+
+    const baseClientOrderId = `s_${Date.now()}`;
+
+    // 1. Лимитный ордер
+    await this.wsApi.newOrder({
+      symbol,
+      side,
+      type: 'LIMIT',
+      timeInForce: 'GTC',
+      quantity: quantityStr,
+      price: entryPrice.toFixed(info.precision || 1),
+      positionSide,
+      newClientOrderId: baseClientOrderId,
+    });
+
+    const slSide = side === 'BUY' ? 'SELL' : 'BUY';
+
+    // 2. Stop-Loss через Algo API
+    const slResp = await this.client.restAPI.newAlgoOrder({
+      symbol,
+      side: slSide as any,
+      algoType: 'CONDITIONAL',
+      type: 'STOP_MARKET',
+      quantity: quantityNum,
+      triggerPrice: stopLoss,
+      workingType: 'MARK_PRICE',
+      positionSide: positionSide as any,
+      newClientOrderId: `sl_${baseClientOrderId}`,
+    } as any);
+
+    // 3. Take-Profit через Algo API
+    const tpResp = await this.client.restAPI.newAlgoOrder({
+      symbol,
+      side: slSide as any,
+      algoType: 'CONDITIONAL',
+      type: 'TAKE_PROFIT_MARKET',
+      quantity: quantityNum,
+      triggerPrice: takeProfit,
+      workingType: 'MARK_PRICE',
+      positionSide: positionSide as any,
+      newClientOrderId: `tp_${baseClientOrderId}`,
+    } as any);
+
+    const slData = await slResp.data();
+    const tpData = await tpResp.data();
+
+    return {
+      entryOrderId: baseClientOrderId,
+      slAlgoId: slData.algoId,
+      tpAlgoId: tpData.algoId,
+      quantity: quantityStr,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      positionSide,
+    };
   }
 
   async getKlines(symbol: string, interval: string, limit = 500): Promise<Candle[]> {
@@ -583,7 +728,6 @@ export class BinanceFuturesClient {
  *  • Использует точное количество из accountInformationV2 → нет риска переворота
  *  • Работает корректно как в Hedge Mode, так и в One-Way Mode
  *  • НЕ использует closePosition: true → избегает ошибки -4136
- *  • Добавлен reduceOnly: true → Binance отклонит ордер, если он увеличит позицию
  * 
  * @param symbol        Торговый символ (например "BTCUSDT", "ETHUSDT")
  * @param positionSide  Сторона позиции: 'LONG' или 'SHORT' (на тестнете — только эти два!)

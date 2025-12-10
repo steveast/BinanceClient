@@ -91,18 +91,48 @@ async function startTradingClient() {
 
 
     // 4. Размещение рыночного ордера
-    console.log(`\n[TRADE] Размещение ордера LONG на ${USD_AMOUNT} USD...`);
+    // console.log(`\n[TRADE] Размещение ордера LONG на ${USD_AMOUNT} USD...`);
 
-    const orderResult = await client.marketOrderByUsd({
-      symbol: SYMBOL,
+    // const orderResult = await client.marketOrder({
+    //   symbol: SYMBOL,
+    //   side: 'BUY',
+    //   usdAmount: USD_AMOUNT,
+    //   positionSide: 'LONG',
+    // });
+
+    // await sleep(10000);
+    // console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
+    // await client.forceClosePosition(SYMBOL, 'LONG');
+
+    const price = 95000;
+    await client.limitOrder({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      usdAmount: 800,
+      price,
+      positionSide: 'SHORT',
+    });
+    // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
+    await client.limitOrderStrategy({
+      symbol: 'BTCUSDT',
       side: 'BUY',
-      usdAmount: USD_AMOUNT,
-      positionSide: 'LONG',
+      usdAmount: 1000,
+      entryPrice: 60000,
+      stopLoss: 59500,
+      takeProfit: 105000,
+      positionSide: 'LONG',  // ← обязательно на тестнете!
     });
 
-    await sleep(10000);
-    console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
-    await client.forceClosePosition(SYMBOL, 'LONG');
+    // Шорт от текущей цены -3%
+    await client.limitOrderStrategy({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      usdAmount: 800,
+      entryPrice: 110000,
+      stopLoss: 115000,
+      takeProfit: 80000,
+      positionSide: 'SHORT',
+    });
 
   } catch (error) {
     console.error('❌ ПРОИЗОШЛА КРИТИЧЕСКАЯ ОШИБКА В РАБОТЕ КЛИЕНТА:', error);
