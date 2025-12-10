@@ -11,8 +11,8 @@ const API_KEY = process.env.BINANCE_API_KEY!;
 const API_SECRET = process.env.BINANCE_API_SECRET!;
 const USE_TESTNET = true; // Установите в false для реальной торговли
 const SYMBOL = 'BTCUSDT';
-const LEVERAGE = 5;
-const USD_AMOUNT = 10; // Сумма в USD для тестового ордера (должна быть больше минимального лимита)
+const LEVERAGE = 10;
+const USD_AMOUNT = 2000; // Сумма в USD для тестового ордера (должна быть больше минимального лимита)
 // --------------------
 
 function sleep(ms: number) {
@@ -27,8 +27,8 @@ async function startTradingClient() {
 
   console.log(`🚀 Запуск клиента Binance Futures (Testnet: ${USE_TESTNET})`);
 
-  const client = new BinanceFuturesClient(API_KEY, API_SECRET, USE_TESTNET);
-  
+  const client = new BinanceFuturesClient(API_KEY, API_SECRET);
+
   // ——————————— 1. Подписки на потоки данных (RxJS) ———————————
 
   // Подписка на изменение статуса соединения
@@ -40,14 +40,14 @@ async function startTradingClient() {
   });
 
   // Подписка на новые 1-минутные свечи
-  client.candles$
-    .pipe(filter((c: Candle | null): c is Candle => c !== null))
-    .subscribe(candle => {
-      // Свеча считается "закрытой", если k.x === true, но мы здесь смотрим на T (closeTime)
-      if (candle.closeTime % 60000 === 0) { // Простой способ проверить, что свеча закрыта (T кратно минуте)
-          console.log(`[CANDLE] ${SYMBOL} | O:${candle.open} H:${candle.high} L:${candle.low} C:${candle.close} | Время: ${new Date(candle.openTime).toLocaleTimeString()}`);
-      }
-    });
+  // client.candles$
+  //   .pipe(filter((c: Candle | null): c is Candle => c !== null))
+  //   .subscribe(candle => {
+  //     // Свеча считается "закрытой", если k.x === true, но мы здесь смотрим на T (closeTime)
+  //     if (candle.closeTime % 60000 === 0) { // Простой способ проверить, что свеча закрыта (T кратно минуте)
+  //       console.log(`[CANDLE] ${SYMBOL} | O:${candle.open} H:${candle.high} L:${candle.low} C:${candle.close} | Время: ${new Date(candle.openTime).toLocaleTimeString()}`);
+  //     }
+  //   });
 
   // Подписка на изменение позиций
   // client.positions$.subscribe(positions => {
@@ -69,20 +69,20 @@ async function startTradingClient() {
     await client.connect(SYMBOL, '1m');
 
     // Ждем установки соединения
-    await sleep(5000); 
+    await sleep(5000);
 
-   if (client.statusValue !== 'connected') { 
-        console.error('🛑 Не удалось установить соединение. Проверьте ключи и права доступа.');
-        return;
+    if (client.statusValue !== 'connected') {
+      console.error('🛑 Не удалось установить соединение. Проверьте ключи и права доступа.');
+      return;
     }
-    
+
     // 1. Настройка режима (Если не хотите хеджировать, пропустите)
-    await client.enableHedgeMode(); 
-    console.log(`[CONFIG] Режим хеджирования включен.`);
+    //await client.enableHedgeMode(); 
+    // console.log(`[CONFIG] Режим хеджирования включен.`);
 
     // 2. Установка плеча
-    await client.setLeverage(SYMBOL, LEVERAGE);
-    console.log(`[CONFIG] Установлено плечо ${LEVERAGE}x для ${SYMBOL}.`);
+    // await client.setLeverage(SYMBOL, LEVERAGE);
+    // console.log(`[CONFIG] Установлено плечо ${LEVERAGE}x для ${SYMBOL}.`);
 
     // 3. Получение исторических данных
     // const klines = await client.getKlines(SYMBOL, '1h', 5);
@@ -92,32 +92,25 @@ async function startTradingClient() {
 
     // 4. Размещение рыночного ордера
     console.log(`\n[TRADE] Размещение ордера LONG на ${USD_AMOUNT} USD...`);
-    
+
     const orderResult = await client.marketOrderByUsd({
       symbol: SYMBOL,
       side: 'BUY',
       usdAmount: USD_AMOUNT,
-      positionSide: 'BOTH',
+      positionSide: 'LONG',
     });
-    console.log('orderResult', orderResult)
-    console.log(`[ORDER] Ордер исполнен. ID: ${orderResult.data().orderId}`);
 
-    // Ждем обновления позиций через UserData Stream
-    // await sleep(3000);
-    
-    // // 5. Закрытие позиции (через 10 секунд, чтобы успеть проверить)
-    // await sleep(10000);
-    // console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
-    // await client.closePosition(SYMBOL, 'BOTH');
-    // console.log('[ORDER] Позиция отправлена на закрытие.');
+    await sleep(10000);
+    console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
+    await client.forceClosePosition(SYMBOL, 'LONG');
 
   } catch (error) {
     console.error('❌ ПРОИЗОШЛА КРИТИЧЕСКАЯ ОШИБКА В РАБОТЕ КЛИЕНТА:', error);
   } finally {
     // В реальной работе destroy не вызывается, но для тестового скрипта это важно
-    // console.log('\n[INFO] Остановка клиента через 5 секунд...');
-    // await sleep(5000);
-    // client.destroy();
+    console.log('\n[INFO] Остановка клиента через 5 секунд...');
+    await sleep(5000);
+    client.destroy();
   }
 }
 

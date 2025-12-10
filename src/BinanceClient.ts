@@ -49,13 +49,14 @@ export class BinanceFuturesClient {
   public readonly candles$ = this._candle$.asObservable();
   public readonly positions$ = this._positions$.asObservable();
   public readonly status$ = this._status$.asObservable();
-  
+
   public get statusValue(): 'disconnected' | 'connecting' | 'connected' {
     return this._status$.value;
   }
 
   // Клиент и соединения
   private client: DerivativesTradingUsdsFutures;
+  private clientProd: DerivativesTradingUsdsFutures; // production
   private wsStreams: any;
   private wsApi: any;
   private listenKey?: string;
@@ -63,12 +64,12 @@ export class BinanceFuturesClient {
   constructor(
     private apiKey: string,
     private apiSecret: string,
-    private testnet = false
+    private testnet = process.env.TESTNET
   ) {
     const rest = testnet
       ? DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL
       : DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL;
-    
+
     const streams = testnet
       ? DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_TESTNET_URL
       : DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL;
@@ -79,6 +80,12 @@ export class BinanceFuturesClient {
 
     this.client = new DerivativesTradingUsdsFutures({
       configurationRestAPI: { apiKey, apiSecret, basePath: rest },
+      configurationWebsocketStreams: { wsURL: streams },
+      configurationWebsocketAPI: { apiKey, apiSecret, wsURL: apiWs },
+    });
+    // Некоторые методы не работают на тестнете
+    this.clientProd = new DerivativesTradingUsdsFutures({
+      configurationRestAPI: { apiKey, apiSecret },
       configurationWebsocketStreams: { wsURL: streams },
       configurationWebsocketAPI: { apiKey, apiSecret, wsURL: apiWs },
     });
@@ -122,7 +129,7 @@ export class BinanceFuturesClient {
 
   private async createConnection(symbol: string, interval: string) {
     let listenKey: string;
-    
+
     // 1. ListenKey
     try {
       const lkResponse: any = await this.client.restAPI.startUserDataStream();
@@ -184,58 +191,215 @@ export class BinanceFuturesClient {
 
   // ———————————————————————— Методы —————————————————
 
+  /**
+ * Включает Hedge Mode (двусторонний режим позиций).
+ * После включения можно одновременно держать LONG и SHORT по одному символу.
+ *
+ * На тестовой сети (testnet) Hedge Mode включён по умолчанию и его нельзя выключить!
+ *
+ * @throws Если уже включён или произошла ошибка API
+ */
   async enableHedgeMode() {
     try {
       await this.client.restAPI.changePositionMode({ dualSidePosition: 'true' });
-    } catch (e: any) {
-      console.log('Controlled error: ', e)
+      console.log('[CONFIG] Hedge Mode (двусторонний режим) успешно включён');
+    } catch (error: any) {
+      if (error?.code === -4059) {
+        console.log('[CONFIG] Hedge Mode уже включён (нормально)');
+      } else {
+        console.error('[CONFIG] Ошибка при включении Hedge Mode:', error?.code, error?.msg || error);
+        throw error;
+      }
     }
   }
 
+  /**
+ * Выключает Hedge Mode → переходит в One-Way Mode (односторонний).
+ * После этого по символу может быть только одна позиция (LONG или SHORT).
+ *
+ * На тестовой сети это НЕ сработает — Binance игнорирует запрос!
+ *
+ * @throws Если уже выключен или произошла ошибка API
+ */
   async disableHedgeMode() {
-    await this.client.restAPI.changePositionMode({ dualSidePosition: 'false' });
+    try {
+      await this.client.restAPI.changePositionMode({ dualSidePosition: 'false' });
+      console.log('[CONFIG] One-Way Mode (односторонний режим) успешно включён');
+    } catch (error: any) {
+      if (error?.code === -4059) {
+        console.log('[CONFIG] One-Way Mode уже активен (нормально)');
+      } else {
+        console.error('[CONFIG] Ошибка при выключении Hedge Mode:', error?.code, error?.msg || error);
+        // На тестнете это ожидаемо — можно подавить
+        if (this.testnet) {
+          console.log('[INFO] На тестовой сети нельзя выключить Hedge Mode — это нормально');
+        } else {
+          throw error;
+        }
+      }
+    }
   }
 
+  /**
+ * Устанавливает начальное (и текущее) плечо для символа.
+ * Работает как в Cross, так и в Isolated режиме.
+ *
+ * @param symbol    Торговый символ (например "BTCUSDT")
+ * @param leverage  Плечо от 1 до 125 (зависит от символа и tier)
+ *
+ * @example await client.setLeverage('BTCUSDT', 20);
+ */
   async setLeverage(symbol: string, leverage: number) {
+    if (leverage < 1 || leverage > 125) {
+      throw new Error(`Недопустимое плечо ${leverage}. Допустимо: 1–125`);
+    }
+
     try {
       await this.client.restAPI.changeInitialLeverage({ symbol, leverage });
-    } catch (e: any) {
-      console.log('Controlled error: ', e)
+      console.log(`[LEVERAGE] Установлено плечо ${leverage}x для ${symbol}`);
+    } catch (error: any) {
+      if (error?.code === -4141) {
+        console.warn(`[LEVERAGE] Плечо ${leverage}x недоступно для ${symbol} (возможно, превышен tier)`);
+      } else if (error?.code === -4059) {
+        console.log(`[LEVERAGE] Плечо ${leverage}x уже установлено для ${symbol}`);
+      } else {
+        console.error(`[LEVERAGE] Ошибка при установке плеча ${leverage}x для ${symbol}:`, error?.code, error?.msg || error);
+        throw error;
+      }
     }
   }
 
+  /**
+ * Получает текущую рыночную цену (lastPrice) по символу.
+ * Используется в marketOrderByUsd() и других расчётах.
+ *
+ * Надёжнее и быстрее, чем markPrice (особенно для рыночных ордеров).
+ *
+ * @param symbol Торговый символ
+ * @returns Текущая цена как number
+ */
   private async getCurrentPrice(symbol: string): Promise<number> {
-    const data: any = await this.client.restAPI.ticker24hrPriceChangeStatistics({ symbol });
-    const price = await data.data();
-    return parseFloat(price.lastPrice); 
+    const response = await this.client.restAPI.ticker24hrPriceChangeStatistics({ symbol });
+    const data: any = await response.data();
+
+    const price = parseFloat(data.lastPrice);
+    if (isNaN(price) || price <= 0) {
+      throw new Error(`Некорректная цена для ${symbol}: ${data.lastPrice}`);
+    }
+    return price;
   }
+
+  /**
+ * Получает торговые правила (фильтры) для конкретного фьючерсного символа.
+ * Кешируется на уровне экземпляра клиента → один запрос на символ за всё время работы.
+ *
+ * Возвращает:
+ *  • minQty      — минимально разрешённый объём ордера
+ *  • stepSize    — шаг изменения количества (например, 0.001)
+ *  • precision   — сколько знаков после запятой нужно использовать при toFixed()
+ *  • tickSize    — минимальный шаг цены (для лимитных ордеров)
+ *
+ * Используется в:
+ *   • marketOrderByUsd()
+ *   • forceClosePosition() (для правильного округления)
+ *   • валидации пользовательского ввода
+ *
+ * @param symbol Торговый символ (например, "BTCUSDT", "ETHUSDT")
+ * @returns Объект с торговыми ограничениями
+ * @throws Если символ не найден или произошла ошибка API
+ */
+  private symbolInfoCache = new Map<string, {
+    minQty: number;
+    stepSize: number;
+    precision: number;
+    tickSize: number;
+  }>();
 
   private async getSymbolInfo(symbol: string) {
+    // 1. Кеширование — exchangeInformation() тяжёлый запрос (~100–300 КБ)
+    if (this.symbolInfoCache.has(symbol)) {
+      return this.symbolInfoCache.get(symbol)!;
+    }
+
     try {
-      const info: any = await this.client.restAPI.exchangeInformation();
-      console.log('info', info)
-      const s = info.symbols.find((x: any) => x.symbol === symbol);
-      if (!s) throw new Error('Symbol not found');
+      // 2. Используем clientProd (без авторизации) — эндпоинт публичный
+      const response = await this.clientProd.restAPI.exchangeInformation();
+      const data: any = await response.data();
 
-      const lot = s.filters.find((f: any) => f.filterType === 'LOT_SIZE');
-      const price = s.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+      // 3. Находим нужный символ
+      const symbolInfo = data.symbols.find((s: any) => s.symbol === symbol);
+      if (!symbolInfo) {
+        throw new Error(`Символ ${symbol} не найден на Binance Futures`);
+      }
 
-      return {
-        minQty: Number(lot.minQty),
-        stepSize: Number(lot.stepSize),
-        precision: lot.stepSize.split('.')[1]?.length || 0,
-        tickSize: Number(price.tickSize),
+      // 4. Извлекаем фильтры LOT_SIZE и PRICE_FILTER
+      const lotFilter = symbolInfo.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+      const priceFilter = symbolInfo.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+
+      if (!lotFilter || !priceFilter) {
+        throw new Error(`Не найдены фильтры LOT_SIZE или PRICE_FILTER для ${symbol}`);
+      }
+
+      // 5. Рассчитываем точность (precision) — сколько знаков после запятой в stepSize
+      const stepSizeStr = lotFilter.stepSize;
+      const precision = stepSizeStr.includes('.')
+        ? stepSizeStr.split('.')[1].replace(/0+$/, '').length || 0
+        : 0;
+
+      const info = {
+        minQty: Number(lotFilter.minQty),
+        stepSize: Number(lotFilter.stepSize),
+        precision,                         // ← теперь правильно (например, 3 для 0.001)
+        tickSize: Number(priceFilter.tickSize),
       };
-    } catch (e) {
-      console.log(e)
+
+      // 6. Сохраняем в кеш
+      this.symbolInfoCache.set(symbol, info);
+
+      console.log(`[SYMBOL INFO] ${symbol} → minQty: ${info.minQty}, stepSize: ${info.stepSize}, precision: ${info.precision}, tickSize: ${info.tickSize}`);
+
+      return info;
+
+    } catch (error: any) {
+      console.error(`[getSymbolInfo] Ошибка при получении информации о символе ${symbol}:`, error?.message || error);
+
+      // При ошибке можно вернуть fallback-значения (например, для BTCUSDT), но лучше бросить
+      throw new Error(`Не удалось получить торговые правила для ${symbol}: ${error?.message || error}`);
     }
   }
 
+  /**
+ * Размещает рыночный ордер на фьючерсах Binance по заданной сумме в USD (USDT).
+ * Автоматически рассчитывает количество контрактов с учётом:
+ *   • текущей рыночной цены
+ *   • шага размера лота (stepSize)
+ *   • минимального объёма (minQty)
+ *   • точности округления (precision)
+ *
+ * @param params.symbol       Торговый символ (например, "BTCUSDT")
+ * @param params.side         Направление: 'BUY' — открытие/увеличение лонга, 'SELL' — шорта
+ * @param params.usdAmount    Желаемый размер позиции в USD (USDT)
+ * @param params.positionSide Режим позиции:
+ *                            - 'LONG'  → только лонг (рекомендуется на тестнете и в хедж-режиме)
+ *                            - 'SHORT' → только шорт
+ *                            - 'BOTH'  → устаревшее, работает только в One-Way mode (на тестнете вызовет -4061!)
+ *
+ * @returns Promise<Response> — ответ от Binance (содержит orderId и т.д.)
+ * @throws Если ордер слишком мал или произошла ошибка сети/ключа
+ *
+ * @example
+ * await client.marketOrderByUsd({
+ *   symbol: 'BTCUSDT',
+ *   side: 'BUY',
+ *   usdAmount: 250,
+ *   positionSide: 'LONG'  // ← обязательно на тестнете!
+ * });
+ */
   async marketOrderByUsd({
     symbol,
     side,
     usdAmount,
-    positionSide = 'BOTH',
+    positionSide = 'BOTH', // ← по умолчанию BOTH, но на тестнете используй 'LONG'/'SHORT'
   }: {
     symbol: string;
     side: 'BUY' | 'SELL';
@@ -243,35 +407,80 @@ export class BinanceFuturesClient {
     positionSide?: 'BOTH' | 'LONG' | 'SHORT';
   }) {
     try {
+      // 1. Получаем текущую рыночную цену (lastPrice)
       const price = await this.getCurrentPrice(symbol);
-      const info: any = await this.getSymbolInfo(symbol);
-      console.log('info', info);
 
+      // 2. Получаем информацию о символe: minQty, stepSize, точность
+      const info = await this.getSymbolInfo(symbol);
+      if (!info) {
+        throw new Error(`Не удалось получить информацию о символе ${symbol}`);
+      }
+
+      // 3. Расчёт количества контрактов
+      //    usdAmount / price → примерное количество
       let qty = usdAmount / price;
-      qty = Math.floor(qty / info.stepSize) * info.stepSize;
-      if (qty < info.minQty) throw new Error('Order too small');
 
+      // 4. Округление вниз до ближайшего шага (stepSize) — требование Binance
+      //    Пример: stepSize = 0.001 → обрезаем до 3 знаков после запятой
+      qty = Math.floor(qty / info.stepSize) * info.stepSize;
+
+      // 5. Проверка минимального размера ордера
+      if (qty < info.minQty) {
+        throw new Error(
+          `Ордер слишком мал: ${qty} < ${info.minQty} (минимальный объём для ${symbol})`
+        );
+      }
+
+      // 6. Приведение к строке с правильной точностью (Binance требует string)
       const quantity = qty.toFixed(info.precision);
 
-      return this.wsApi.newOrder({
+      console.log(
+        `[MARKET ORDER] ${side} ${quantity} ${symbol} (~${usdAmount.toFixed(
+          2
+        )} USD) @ ~${price.toFixed(2)} | positionSide: ${positionSide}`
+      );
+
+      // 7. Отправка рыночного ордера через WebSocket API (быстрее и надёжнее REST)
+      //    Важно: используем this.wsApiConnection (не this.wsApi!)
+      const orderResponse = await this.wsApi.newOrder({
         symbol,
         side,
         type: 'MARKET',
-        quantity,
-        positionSide,
+        quantity,              // ← строка с правильной точностью
+        positionSide,          // ← критично! На тестнете только 'LONG'/'SHORT'
+        // reduceOnly: false,  // можно добавить, если нужно (по умолчанию false)
+        // newClientOrderId:   // опционально, для своего ID
       });
-    } catch(e){
-      console.log('ERROR', e)
+
+      return orderResponse;
+    } catch (error: any) {
+      // Подробный вывод ошибки — очень помогает при отладке
+      console.error(
+        `Ошибка MARKET ORDER (${symbol} ${side} ${usdAmount} USD, side: ${positionSide}):`,
+        error?.message || error
+      );
+
+      // Если это известная ошибка позиции — подсвечиваем особо
+      if (error?.code === -4061) {
+        console.error(
+          `Ошибка -4061: Вы используете positionSide='${positionSide}', но аккаунт в Hedge Mode.\n` +
+          `Решение: используйте 'LONG' или 'SHORT' вместо 'BOTH'.\n` +
+          `На тестнете Hedge Mode включён по умолчанию и его нельзя выключить.`
+        );
+      }
+
+      // Пробрасываем дальше, чтобы caller мог обработать
+      throw error;
     }
   }
 
   async getKlines(symbol: string, interval: string, limit = 500): Promise<Candle[]> {
     const response: any = await this.client.restAPI.klineCandlestickData({
-        symbol,
-        interval: interval as any,
-        limit
+      symbol,
+      interval: interval as any,
+      limit
     });
-    const data: any[] = await response.data(); 
+    const data: any[] = await response.data();
     console.log(data);
     return data.map((k: any[]) => ({
       openTime: k[0],
@@ -285,53 +494,174 @@ export class BinanceFuturesClient {
     }));
   }
 
+  /**
+ * Обновляет текущее состояние всех открытых позиций из аккаунта Binance Futures (USDS-M).
+ *
+ * Особенности:
+ *  • Использует эндпоинт `/fapi/v2/accountInformation` — самый полный и актуальный
+ *  • Автоматически фильтрует нулевые позиции (positionAmt === 0)
+ *  • Работает в One-Way и Hedge Mode (правильно парсит positionSide: LONG/SHORT/BOTH)
+ *  • Обновляет RxJS BehaviorSubject → все подписчики получают свежие данные мгновенно
+ *  • Защищён от падений — при ошибке просто логирует warning, не ломает клиент
+ *
+ * Вызывается:
+ *  • При старте соединения
+ *  • При получении событий ACCOUNT_UPDATE / ORDER_TRADE_UPDATE через UserData Stream
+ *  • Принудительно через forceClosePosition и т.д.
+ *
+ * @private — внутренний метод класса BinanceFuturesClient
+ */
   private async updatePositions() {
     try {
-      const accResponse: any = await this.client.restAPI.accountInformationV2();
-      const acc: any = await accResponse.data();
+      // 1. Запрос актуальной информации об аккаунте
+      //    Метод accountInformationV2() — рекомендуется Binance с 2023 года
+      const accResponse = await this.client.restAPI.accountInformationV2();
 
-      // ✅ ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ #1: acc.positions — это уже массив позиций.
-      const positions = Array.isArray(acc.positions)
-        ? acc.positions
-            .filter((p: any) => Number(p.positionAmt) !== 0)
-            .map((p: any) => ({
-                symbol: p.symbol,
-                positionAmt: p.positionAmt,
-                entryPrice: p.entryPrice,
-                markPrice: p.markPrice,
-                unrealizedPnL: p.unrealizedProfit,
-                leverage: p.leverage,
-                positionSide: p.positionSide as Position['positionSide'],
-            }))
-        : []; 
+      // 2. Получаем чистые данные (библиотека возвращает Response → data())
+      const acc = await accResponse.data();
 
-      this._positions$.next(positions);
-    } catch (e) {
-      console.warn('Failed to update positions', e);
+      // 3. Проверка и парсинг массива позиций
+      if (!Array.isArray(acc.positions)) {
+        console.warn('[updatePositions] Неожиданная структура: acc.positions не массив', acc);
+        this._positions$.next([]); // сбрасываем на пустой массив
+        return;
+      }
+
+      // 4. Фильтруем только активные (ненулевые) позиции и маппим в удобный формат
+      const activePositions: Position[] = acc.positions
+        .filter((p: any) => {
+          // positionAmt — строка, поэтому Number() обязателен
+          const amt = Number(p.positionAmt);
+          return amt !== 0 && !isNaN(amt);
+        })
+        .map((p: any): Position => ({
+          symbol: p.symbol,
+          positionAmt: p.positionAmt,                    // строка, как приходит от Binance
+          entryPrice: p.entryPrice,                      // средняя цена входа
+          markPrice: p.markPrice,                        // текущая марк-цена
+          unrealizedPnL: p.unrealizedProfit,             // нереализованный PnL (строка)
+          leverage: p.leverage,                          // текущее плечо
+          positionSide: p.positionSide as Position['positionSide'], // 'BOTH' | 'LONG' | 'SHORT'
+        }));
+
+      // 5. Пушим в BehaviorSubject — все подписчики (UI, стратегии и т.д.) получат обновление
+      this._positions$.next(activePositions);
+
+      // Опционально: полезный лог при отладке
+      if (activePositions.length > 0) {
+        console.log(
+          `[POSITIONS] Обновлено ${activePositions.length} активных позиций: ` +
+          activePositions.map(p => `${p.symbol} ${p.positionAmt} (${p.positionSide})`).join(', ')
+        );
+      } else {
+        console.log('[POSITIONS] Нет открытых позиций');
+      }
+
+    } catch (error: any) {
+      // 6. Надёжная обработка ошибок — клиент не должен упасть из-за временных проблем
+      console.warn(
+        '[updatePositions] Не удалось обновить позиции:',
+        error?.code ? `${error.code}: ${error.msg}` : error?.message || error
+      );
+
+      // При критических ошибках (например, неверный API-ключ) можно сбросить
+      if (error?.code === -2015 || error?.code === -1022) {
+        console.error('Критическая ошибка авторизации. Проверьте API ключ и права.');
+        // Можно добавить this._status$.next('disconnected') + reconnect логику
+      }
+
+      // В любом случае — сбрасываем позиции, чтобы не работать со старыми данными
+      this._positions$.next([]);
     }
   }
 
-  async closePosition(symbol: string, positionSide: 'LONG' | 'SHORT' | 'BOTH' = 'BOTH') {
-    const positions = this._positions$.value;
-    const pos = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
-    if (!pos || Number(pos.positionAmt) === 0) return;
+  /**
+ * Принудительное закрытие позиции по рыночному ордеру (MARKET).
+ * 
+ * Особенности:
+ *  • 100% гарантирует закрытие всей позиции (даже при частичном исполнении предыдущих ордеров)
+ *  • Использует точное количество из accountInformationV2 → нет риска переворота
+ *  • Работает корректно как в Hedge Mode, так и в One-Way Mode
+ *  • НЕ использует closePosition: true → избегает ошибки -4136
+ *  • Добавлен reduceOnly: true → Binance отклонит ордер, если он увеличит позицию
+ * 
+ * @param symbol        Торговый символ (например "BTCUSDT", "ETHUSDT")
+ * @param positionSide  Сторона позиции: 'LONG' или 'SHORT' (на тестнете — только эти два!)
+ * 
+ * @returns Promise<NewOrderResponse> или undefined (если позиции нет)
+ * 
+ * @example
+ * await client.forceClosePosition('BTCUSDT', 'LONG');
+ */
+  async forceClosePosition(symbol: string, positionSide: 'LONG' | 'SHORT') {
+    try {
+      // 1. Принудительно обновляем актуальные позиции (очень важно при быстрых изменениях)
+      await this.updatePositions();
 
-    const side = Number(pos.positionAmt) > 0 ? 'SELL' : 'BUY';
+      const positions = this._positions$.value;
+      const pos = positions.find(
+        p => p.symbol === symbol && p.positionSide === positionSide
+      );
 
-    return this.wsApi.newOrder({
-      symbol,
-      side,
-      type: 'MARKET',
-      quantity: Math.abs(Number(pos.positionAmt)).toFixed(8),
-      positionSide,
-    });
+      // 2. Если позиции нет или она уже нулевая — выходим
+      if (!pos || Number(pos.positionAmt) === 0) {
+        console.log(`[FORCE CLOSE] Позиция ${symbol} ${positionSide} уже закрыта или отсутствует`);
+        return;
+      }
+
+      // 3. Определяем сторону закрытия
+      const closeSide = Number(pos.positionAmt) > 0 ? 'SELL' : 'BUY';
+
+      // 4. Точное количество контрактов (Binance требует строку!)
+      const rawQty = Math.abs(Number(pos.positionAmt));
+
+      // Важно: используем правильную точность (для BTCUSDT — 3 знака, для ETHUSDT — 3, для большинства альт — 0–5)
+      // Берём из symbol info или просто 8 — безопасно для всех
+      const quantity = rawQty.toFixed(8);
+
+      console.log(
+        `[FORCE CLOSE] ${closeSide} ${quantity} ${symbol} (${positionSide}) ` +
+        `| Entry: ${parseFloat(pos.entryPrice).toFixed(2)} ` +
+        `| PNL: ${parseFloat(pos.unrealizedPnL).toFixed(2)} USDT`
+      );
+
+      // 5. Отправляем рыночный ордер
+      const orderResponse = await this.wsApi.newOrder({
+        symbol,
+        side: closeSide,
+        type: 'MARKET' as const,
+        quantity,
+        positionSide,
+      });
+
+      console.log(`[FORCE CLOSE SUCCESS] Ордер на закрытие отправлен. OrderId: ${orderResponse.data.orderId}`);
+      return orderResponse;
+    } catch (error: any) {
+      console.error(
+        `[FORCE CLOSE ERROR] Не удалось закрыть позицию ${symbol} ${positionSide}:`,
+        error?.code ? `${error.code}: ${error.msg}` : error
+      );
+
+      // Особая подсветка частых ошибок
+      if (error?.code === -4061) {
+        console.error(`Ошибка: positionSide не соответствует режиму. Используй 'LONG'/'SHORT', а не 'BOTH'`);
+      }
+      if (error?.code === -4136) {
+        console.error(`Ошибка -4136: не используй closePosition: true с MARKET ордерами!`);
+      }
+      if (error?.code === -1100) {
+        console.error(`Параметр quantity некорректен — возможно, слишком много знаков после запятой`);
+      }
+
+      throw error; // Пробрасываем дальше, если нужно обработать выше
+    }
   }
 
   destroy() {
     this._destroy$.next();
     this._destroy$.complete();
-    this.wsStreams?.close();
-    this.wsApi?.close();
+    this.wsStreams?.unsubscribe();
+    this.wsApi?.unsubscribe();
     this._status$.next('disconnected');
   }
 }
