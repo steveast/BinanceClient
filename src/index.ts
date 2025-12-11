@@ -128,17 +128,16 @@ async function startTradingClient() {
       symbol: 'BTCUSDT',
       side: 'BUY',
       usdAmount: 1000,
-      entryPrice: 60000,
-      stopLoss: 59500,
+      entryPrice: 70000,
+      stopLoss: 60000,
       takeProfit: 105000,
       positionSide: 'LONG',  // ← обязательно на тестнете!
     });
     console.log(strategy);
     await sleep(3000);
-    // await client.cancelOrder({ symbol: 'BTCUSDT', clientOrderId: strategy.entryOrderId });
-    // await client.cancelAlgoOrder(strategy.slAlgoId);
-    // await client.cancelAlgoOrder(strategy.tpAlgoId);
-    await client.cancelAllOrders('BTCUSDT');
+    await client.cancelOrder({ symbol: 'BTCUSDT', clientOrderId: strategy.entryOrderId });
+    await client.cancelAlgoOrder(strategy.slAlgoId);
+    await client.cancelAlgoOrder(strategy.tpAlgoId);
 
     // await client.modifyLimitOrder({
     //   symbol: 'BTCUSDT',
