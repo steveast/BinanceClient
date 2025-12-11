@@ -503,49 +503,18 @@ export class BinanceFuturesClient {
     });
   }
 
-  /**
- * Изменяет существующий лимитный ордер (цена и/или размер позиции).
- * Размер позиции указывается в USD (USDT) — как и в marketOrderByUsd / limitOrderStrategy.
- *
- * Особенности:
- *  • qty — это сумма в долларах (USDT), а не количество контрактов
- *  • Автоматически округляет количество до stepSize и precision символа
- *  • quantity всегда передаётся (обязательный параметр modifyOrder)
- *  • Работает через REST API — надёжно и без лишних запросов
- *
- * Важно:
- *  • Ордер должен существовать и быть в статусе NEW/PARTIALLY_FILLED
- *  • Изменение размера может быть ограничено лимитами позиции (leverage/tier)
- *
- * @param symbol           Торговый символ (например "BTCUSDT")
- * @param orderId          ID ордера (если известен)
- * @param newPrice         Новая цена лимитного ордера
- * @param qty              Новый размер позиции в USD (USDT)
- * @param side             Направление ордера: 'BUY' или 'SELL'
- *
- * @returns Ответ Binance с обновлёнными данными ордера
- *
- * @example
- * // Подтянуть лимитный ордер и увеличить позицию до 2500$
- * await client.modifyLimitOrder({
- *   symbol: 'BTCUSDT',
- *   orderId: 123456789,
- *   side: 'BUY',
- *   newPrice: 60250,
- *   qty: 2500
- * });
- */
   async modifyLimitOrder({
     symbol,
     orderId,
     newPrice,
     qty: qtyInUsd,
+    // Параметр side необходим для типа функции, но его значение не используется напрямую в payload
     side,
   }: {
     symbol: string;
-    orderId?: | string; // ✅ ИЗМЕНЕНО: Добавлен тип string;
+    orderId?: number | string;
     newPrice: number;
-    qty: number;           // ← размер в USD (USDT)
+    qty: number;
     side: 'BUY' | 'SELL';
   }) {
     const info = await this.getSymbolInfo(symbol);
@@ -556,25 +525,64 @@ export class BinanceFuturesClient {
       throw new Error(`Новый объём слишком мал: ${qty} < ${info.minQty} (${symbol})`);
     }
 
-    const quantity = qty.toFixed(info.precision);
+    const quantityStr = qty.toFixed(info.precision);
+    const quantityNum = Number(quantityStr);
+
+    const roundedNewPrice = Number(newPrice.toFixed(info.precision || 1));
+
+    // Изначальный payload без side, мы добавим его позже из orderData
     const payload: any = {
       symbol,
-      side,
-      type: 'LIMIT',
-      price: newPrice.toFixed(info.precision || 1),
-      quantity,
+      type: 'LIMIT' as any,
+      price: roundedNewPrice,
+      quantity: quantityNum,
     };
 
-    // 2. Изменение логики обработки ID
     if (orderId) {
+      let binanceOrderId: number | undefined;
+      let originalOrderSide: 'BUY' | 'SELL' | undefined; // Переменная для хранения оригинального side
+
+      // 1. КРИТИЧЕСКАЯ ПРОВЕРКА СТАТУСА:
+      try {
+        const statusCheck = await this.client.restAPI.queryOrder({
+          symbol,
+          orderId: typeof orderId === 'number' ? orderId : undefined,
+          origClientOrderId: typeof orderId === 'string' ? orderId : undefined,
+        });
+        const orderData = await statusCheck.data();
+
+        binanceOrderId = Number(orderData.orderId);
+        originalOrderSide = orderData.side as 'BUY' | 'SELL'; // ✅ ИЗВЛЕКАЕМ ОРИГИНАЛЬНЫЙ SIDE
+
+        if (orderData.status !== 'NEW' && orderData.status !== 'PARTIALLY_FILLED') {
+          const message = `[MODIFY ABORTED] Ордер ${orderId} имеет статус ${orderData.status}. Модификация невозможна.`;
+          console.warn(message);
+          return orderData;
+        }
+        console.log(`[MODIFY CHECK] Ордер ${orderId} (Binance ID: ${binanceOrderId}) в статусе ${orderData.status}. Продолжаем модификацию...`);
+
+        // ✅ ФИКС: ДОБАВЛЯЕМ ОРИГИНАЛЬНЫЙ SIDE В PAYLOAD
+        if (originalOrderSide) {
+          payload.side = originalOrderSide;
+        } else {
+          throw new Error(`Не удалось получить оригинальное направление (side) ордера.`);
+        }
+
+      } catch (error: any) {
+        console.error(`[MODIFY ERROR] Ошибка при проверке статуса ордера ${orderId}. Модификация невозможна.`);
+        throw error;
+      }
+
+      // 2. ФОРМИРОВАНИЕ PAYLOAD ДЛЯ MODIFY (Использование Client ID)
       if (typeof orderId === 'number') {
-        payload.orderId = orderId; // Если передано число (Binance Order ID)
+        payload.orderId = orderId;
       } else {
-        // Если передана строка (Client Order ID), используется origClientOrderId
         payload.origClientOrderId = orderId;
+        payload.newClientOrderId = `mod_${Date.now()}`;
       }
     }
 
+    // Вызов модификации
     const resp = await this.client.restAPI.modifyOrder(payload);
     const data = await resp.data();
 
@@ -711,15 +719,7 @@ export class BinanceFuturesClient {
 
   /**
  * Устанавливает полноценную стратегию: лимитный вход + стоп-лосс + тейк-профит.
- * Полностью рабочая версия под Binance Futures USDS-M после миграции Algo Order API (9 декабря 2025).
- *
- * Особенности:
- *   • positionSide — только 'LONG' или 'SHORT' (соответствует Hedge Mode)
- *   • SL и TP создаются через newAlgoOrder → нет ошибки -4120
- *   • Все обязательные поля Algo API: triggerPrice, workingType, quantity как number
- *   • reduceOnly не передаётся — не работает при предустановке SL/TP
- *   • Лимитный ордер через WebSocket API — максимальная скорость
- *   • Автоматическое округление до stepSize и precision
+ * Полностью рабочая версия под Binance Futures USDS-M после миграции Algo Order API.
  *
  * @param symbol        Торговый символ (например "BTCUSDT")
  * @param side          Направление входа: 'BUY' = LONG, 'SELL' = SHORT
@@ -730,17 +730,6 @@ export class BinanceFuturesClient {
  * @param positionSide  Сторона позиции: 'LONG' или 'SHORT'
  *
  * @returns Объект с ID всех созданных ордеров и параметрами
- *
- * @example
- * await client.limitOrderStrategy({
- *   symbol: 'BTCUSDT',
- *   side: 'BUY',
- *   usdAmount: 1000,
- *   entryPrice: 60000,
- *   stopLoss: 59400,
- *   takeProfit: 61200,
- *   positionSide: 'LONG'
- * });
  */
   async limitOrderStrategy({
     symbol,
@@ -770,17 +759,22 @@ export class BinanceFuturesClient {
 
     const baseClientOrderId = `s_${Date.now()}`;
 
-    // 1. Лимитный ордер
-    await this.wsApi.newOrder({
+    // Округляем цену до нужной точности и преобразуем в число
+    const roundedEntryPrice = Number(entryPrice.toFixed(info.precision || 1));
+
+    // 1. Лимитный ордер (Вход) через REST API
+    const entryResp = await this.client.restAPI.newOrder({
       symbol,
-      side,
-      type: 'LIMIT',
-      timeInForce: 'GTC',
-      quantity: quantityStr,
-      price: entryPrice.toFixed(info.precision || 1),
-      positionSide,
+      side: side as any,
+      type: 'LIMIT' as any,
+      timeInForce: 'GTC' as any,
+      quantity: quantityNum,
+      price: roundedEntryPrice,
+      positionSide: positionSide as any,
       newClientOrderId: baseClientOrderId,
     });
+
+    const entryData = await entryResp.data();
 
     const slSide = side === 'BUY' ? 'SELL' : 'BUY';
 
@@ -788,35 +782,35 @@ export class BinanceFuturesClient {
     const slResp = await this.client.restAPI.newAlgoOrder({
       symbol,
       side: slSide as any,
-      algoType: 'CONDITIONAL',
-      type: 'STOP_MARKET',
+      algoType: 'CONDITIONAL' as any,
+      type: 'STOP_MARKET' as any,
       quantity: quantityNum,
       triggerPrice: stopLoss,
-      workingType: 'MARK_PRICE',
+      workingType: 'MARK_PRICE' as any,
       positionSide: positionSide as any,
-      newClientOrderId: `sl_${baseClientOrderId}`,
-    } as any);
+      // ✅ УДАЛЕНО: newClientOrderId, т.к. не существует в NewAlgoOrderRequest$1
+    });
 
     // 3. Take-Profit через Algo API
     const tpResp = await this.client.restAPI.newAlgoOrder({
       symbol,
       side: slSide as any,
-      algoType: 'CONDITIONAL',
-      type: 'TAKE_PROFIT_MARKET',
+      algoType: 'CONDITIONAL' as any,
+      type: 'TAKE_PROFIT_MARKET' as any,
       quantity: quantityNum,
       triggerPrice: takeProfit,
-      workingType: 'MARK_PRICE',
+      workingType: 'MARK_PRICE' as any,
       positionSide: positionSide as any,
-      newClientOrderId: `tp_${baseClientOrderId}`,
-    } as any);
+      // ✅ УДАЛЕНО: newClientOrderId, т.к. не существует в NewAlgoOrderRequest$1
+    });
 
     const slData = await slResp.data();
     const tpData = await tpResp.data();
 
     return {
-      entryOrderId: baseClientOrderId,
-      slAlgoId: slData.algoId as any, // TODO
-      tpAlgoId: tpData.algoId as any, // TODO
+      entryOrderId: entryData.clientOrderId as string,
+      slAlgoId: slData.algoId as number,
+      tpAlgoId: tpData.algoId as number,
       quantity: quantityStr,
       entryPrice,
       stopLoss,

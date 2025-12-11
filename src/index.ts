@@ -104,24 +104,24 @@ async function startTradingClient() {
     // console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
     // await client.forceClosePosition(SYMBOL, 'LONG');
 
-    // const price = 95000;
-    // const limitOrder = await client.limitOrder({
-    //   symbol: 'BTCUSDT',
-    //   side: 'SELL',
-    //   usdAmount: 800,
-    //   price,
-    //   positionSide: 'SHORT',
-    // });
-    // console.log(limitOrder.data.orderId);
-    // await sleep(3000);
+    const price = 95000;
+    const limitOrder = await client.limitOrder({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      usdAmount: 800,
+      price,
+      positionSide: 'SHORT',
+    });
+    console.log(limitOrder.data.orderId);
+    await sleep(3000);
 
-    // await client.modifyLimitOrder({
-    //   symbol: 'BTCUSDT',
-    //   side: 'SELL',
-    //   orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
-    //   newPrice: 105000,                         // опционально — можно изменить объём
-    //   qty: 800,
-    // });
+    await client.modifyLimitOrder({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
+      newPrice: 105000,                         // опционально — можно изменить объём
+      qty: 800,
+    });
     // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
     const strategy = await client.limitOrderStrategy({
       symbol: 'BTCUSDT',
@@ -133,7 +133,7 @@ async function startTradingClient() {
       positionSide: 'LONG',  // ← обязательно на тестнете!
     });
     console.log(strategy);
-    await sleep(1000);
+    await sleep(5000);
 
     await client.modifyLimitOrder({
       symbol: 'BTCUSDT',
