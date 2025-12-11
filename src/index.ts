@@ -104,33 +104,60 @@ async function startTradingClient() {
     // console.log(`\n[TRADE] Закрытие позиции ${SYMBOL}...`);
     // await client.forceClosePosition(SYMBOL, 'LONG');
 
-    const price = 95000;
-    const limitOrder = await client.limitOrder({
+    // const price = 95000;
+    // const limitOrder = await client.limitOrder({
+    //   symbol: 'BTCUSDT',
+    //   side: 'SELL',
+    //   usdAmount: 800,
+    //   price,
+    //   positionSide: 'SHORT',
+    // });
+    // console.log(limitOrder.data.orderId);
+    // await sleep(3000);
+
+    // await client.modifyLimitOrder({
+    //   symbol: 'BTCUSDT',
+    //   side: 'SELL',
+    //   orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
+    //   newPrice: 105000,                         // опционально — можно изменить объём
+    //   qty: 800,
+    // });
+    // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
+    const strategy = await client.limitOrderStrategy({
       symbol: 'BTCUSDT',
-      side: 'SELL',
-      usdAmount: 800,
-      price,
-      positionSide: 'SHORT',
+      side: 'BUY',
+      usdAmount: 1000,
+      entryPrice: 60000,
+      stopLoss: 59500,
+      takeProfit: 105000,
+      positionSide: 'LONG',  // ← обязательно на тестнете!
     });
-    console.log(limitOrder.data.orderId);
-    await sleep(3000);
+    console.log(strategy);
+    await sleep(1000);
 
     await client.modifyLimitOrder({
       symbol: 'BTCUSDT',
       side: 'SELL',
-      orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
-      newPrice: 105000,                         // опционально — можно изменить объём
-      qty: 800,
+      orderId: strategy.entryOrderId,
+      newPrice: 86000,
+      qty: 1000,
     });
-    // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
-    // await client.limitOrderStrategy({
+    // Для TP
+    // await client.modifyTP({
     //   symbol: 'BTCUSDT',
-    //   side: 'BUY',
-    //   usdAmount: 1000,
-    //   entryPrice: 60000,
-    //   stopLoss: 59500,
-    //   takeProfit: 105000,
-    //   positionSide: 'LONG',  // ← обязательно на тестнете!
+    //   algoId: strategy.tpAlgoId,
+    //   newTriggerPrice: 110000,
+    //   newQuantityUsd: 1000,
+    //   positionSide: 'LONG',
+    // });
+
+    // // Для SL (если нужно)
+    // await client.modifySL({
+    //   symbol: 'BTCUSDT',
+    //   algoId: strategy.slAlgoId,
+    //   newTriggerPrice: 57000,
+    //   newQuantityUsd: 1000,
+    //   positionSide: 'LONG',
     // });
 
     // // Шорт от текущей цены -3%
@@ -148,9 +175,9 @@ async function startTradingClient() {
     console.error('❌ ПРОИЗОШЛА КРИТИЧЕСКАЯ ОШИБКА В РАБОТЕ КЛИЕНТА:', error);
   } finally {
     // В реальной работе destroy не вызывается, но для тестового скрипта это важно
-    console.log('\n[INFO] Остановка клиента через 5 секунд...');
-    await sleep(5000);
-    client.destroy();
+    // console.log('\n[INFO] Остановка клиента через 5 секунд...');
+    // await sleep(5000);
+    // client.destroy();
   }
 }
 

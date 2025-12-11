@@ -543,7 +543,7 @@ export class BinanceFuturesClient {
     side,
   }: {
     symbol: string;
-    orderId?: number;
+    orderId?: | string; // ✅ ИЗМЕНЕНО: Добавлен тип string;
     newPrice: number;
     qty: number;           // ← размер в USD (USDT)
     side: 'BUY' | 'SELL';
@@ -565,12 +565,148 @@ export class BinanceFuturesClient {
       quantity,
     };
 
-    if (orderId) payload.orderId = orderId;
+    // 2. Изменение логики обработки ID
+    if (orderId) {
+      if (typeof orderId === 'number') {
+        payload.orderId = orderId; // Если передано число (Binance Order ID)
+      } else {
+        // Если передана строка (Client Order ID), используется origClientOrderId
+        payload.origClientOrderId = orderId;
+      }
+    }
 
     const resp = await this.client.restAPI.modifyOrder(payload);
     const data = await resp.data();
 
     return data;
+  }
+
+  /**
+ * Изменяет существующий Take-Profit или Stop-Loss (algo-ордер) на Binance USDS-M Futures.
+ * Работает путём отмены старого ордера и создания нового с обновлёнными параметрами.
+ *
+ * Важно: Binance не поддерживает прямую модификацию algo-ордеров после миграции API (декабрь 2025).
+ *
+ * @param symbol           Торговый символ (например "BTCUSDT")
+ * @param algoId           Algo order ID из ответа newAlgoOrder (например: 1000000000214986)
+ * @param newTriggerPrice  Новая цена срабатывания (trigger price)
+ * @param newQuantityUsd   Новый размер в USD (опционально). Если не указан — берётся из текущей позиции
+ * @param positionSide     Сторона позиции: 'LONG' или 'SHORT'
+ * @param isTakeProfit     true = Take-Profit, false = Stop-Loss (по умолчанию true)
+ *
+ * @returns Ответ Binance с новым algoId и параметрами
+ *
+ * @throws Если позиция не найдена и newQuantityUsd не указан
+ * @throws Если algoId не существует или уже исполнен
+ *
+ * @example
+ * await client.modifyTP({ symbol: 'BTCUSDT', algoId: 1000000000214986, newTriggerPrice: 110000, positionSide: 'LONG' });
+ */
+  private async modifyTakeProfitOrStopLoss({
+    symbol,
+    algoId,
+    newTriggerPrice,
+    newQuantityUsd,
+    positionSide,
+    isTakeProfit = true,
+  }: {
+    symbol: string;
+    algoId: number;
+    newTriggerPrice: number;
+    newQuantityUsd?: number;
+    positionSide: 'LONG' | 'SHORT';
+    isTakeProfit?: boolean;
+  }) {
+    try {
+      if (!algoId) throw new Error('algoId обязателен');
+
+      await this.updatePositions();
+      const position = this._positions$.value.find(
+        p => p.symbol === symbol && p.positionSide === positionSide
+      );
+
+      let quantityNum: number;
+      if (newQuantityUsd !== undefined) {
+        const price = await this.getCurrentPrice(symbol);
+        const info = await this.getSymbolInfo(symbol);
+        let qty = newQuantityUsd / price;
+        qty = Math.floor(qty / info.stepSize) * info.stepSize;
+        if (qty < info.minQty) throw new Error('Новый объём слишком мал');
+        quantityNum = Number(qty.toFixed(info.precision));
+      } else if (position) {
+        quantityNum = Math.abs(Number(position.positionAmt));
+      } else {
+        throw new Error(`Позиция ${symbol} ${positionSide} не найдена. Укажите newQuantityUsd явно (размер в USD).`);
+      }
+
+      const closeSide = positionSide === 'LONG' ? 'SELL' : 'BUY';
+      const algoType = isTakeProfit ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET';
+
+      // Отмена старого
+      const cancelResp = await this.client.restAPI.cancelAlgoOrder({ algoid: algoId });
+      const cancelData = await cancelResp.data();
+      console.log(`[ALGO CANCEL] AlgoId ${algoId} отменён`);
+
+      // Создание нового
+      const newResp = await this.client.restAPI.newAlgoOrder({
+        symbol,
+        side: closeSide as any,
+        algoType: 'CONDITIONAL',
+        type: algoType,
+        quantity: quantityNum,
+        triggerPrice: newTriggerPrice,
+        workingType: 'MARK_PRICE',
+        positionSide: positionSide as any,
+        newClientOrderId: `mod_${algoType.toLowerCase()}_${Date.now()}`,
+      } as any);
+
+      const newData = await newResp.data();
+      console.log(`[ALGO MODIFY] Новый ${algoType} создан: algoId=${newData.algoId}, price=${newTriggerPrice}, qty=${quantityNum}`);
+      return newData;
+    } catch (error: any) {
+      console.error(`Не удалось изменить algo-ордер ${algoId}:`, error?.code, error?.msg || error.message || error);
+      throw error;
+    }
+  }
+
+  /**
+   * Изменяет Take-Profit (TP) algo-ордер
+   *
+   * @example
+   * await client.modifyTP({
+   *   symbol: 'BTCUSDT',
+   *   algoId: strategy.tpAlgoId!,
+   *   newTriggerPrice: 110000,
+   *   newQuantityUsd: 1000,     // опционально, если позиция ещё не открыта
+   *   positionSide: 'LONG'
+   * });
+   */
+  async modifyTP(params: {
+    symbol: string; algoId: number; newTriggerPrice: number; newQuantityUsd?: number; positionSide: 'LONG' | 'SHORT'
+  }) {
+    return this.modifyTakeProfitOrStopLoss({ ...params, isTakeProfit: true });
+  }
+
+  /**
+   * Изменяет Stop-Loss (SL) algo-ордер
+   *
+   * @example
+   * await client.modifySL({
+   *   symbol: 'BTCUSDT',
+   *   algoId: strategy.slAlgoId!,
+   *   newTriggerPrice: 58000,
+   *   newQuantityUsd: 1000,
+   *   positionSide: 'LONG'
+   * });
+   */
+  async modifySL(params: {
+    symbol: string;
+    algoId: number;
+    newTriggerPrice: number;
+    newQuantityUsd?: number;
+    positionSide: 'LONG' | 'SHORT';
+  }) {
+    return this.modifyTakeProfitOrStopLoss({ ...params, isTakeProfit: false });
   }
 
   /**
@@ -679,8 +815,8 @@ export class BinanceFuturesClient {
 
     return {
       entryOrderId: baseClientOrderId,
-      slAlgoId: slData.algoId,
-      tpAlgoId: tpData.algoId,
+      slAlgoId: slData.algoId as any, // TODO
+      tpAlgoId: tpData.algoId as any, // TODO
       quantity: quantityStr,
       entryPrice,
       stopLoss,
