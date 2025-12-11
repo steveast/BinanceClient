@@ -1001,6 +1001,74 @@ export class BinanceFuturesClient {
     }
   }
 
+  async cancelOrder({
+    symbol,
+    orderId,
+    clientOrderId,
+  }: {
+    symbol: string;
+    orderId?: number | string;
+    clientOrderId?: string;
+  }) {
+    if (!orderId && !clientOrderId) {
+      throw new Error('Нужно указать orderId или clientOrderId');
+    }
+
+    try {
+      const payload: any = { symbol };
+      if (orderId) payload.orderId = orderId;
+      if (clientOrderId) payload.origClientOrderId = clientOrderId;
+
+      const resp = await this.client.restAPI.cancelOrder(payload);
+      const data = await resp.data();
+
+      console.log(`[CANCEL ORDER] Успешно отменён ордер ${orderId || clientOrderId} на ${symbol}`);
+      return data;
+    } catch (error: any) {
+      console.error(`[CANCEL ORDER ERROR] ${symbol} ${orderId || clientOrderId}:`, error?.code, error?.msg || error);
+      throw error;
+    }
+  }
+
+  async cancelAlgoOrder(algoId: number) {
+    if (!algoId) throw new Error('algoId обязателен');
+
+    try {
+      const resp = await this.client.restAPI.cancelAlgoOrder({ algoid: algoId });
+      const data = await resp.data();
+
+      console.log(`[CANCEL ALGO] Успешно отменён algo-ордер ${algoId}`);
+      return data;
+    } catch (error: any) {
+      // -4024 = уже исполнен или отменён — это нормально
+      if (error?.code === -4024) {
+        console.log(`[CANCEL ALGO] AlgoId ${algoId} уже не существует (возможно, исполнен)`);
+      } else {
+        console.error(`[CANCEL ALGO ERROR] ${algoId}:`, error?.code, error?.msg || error);
+      }
+
+      throw error;
+    }
+  }
+
+  async cancelAllOrders(symbol?: string) {
+    try {
+      const payload: any = symbol ? { symbol } : {};
+      const resp = await this.client.restAPI.cancelAllOpenOrders(payload);
+      const data = await resp.data();
+
+      if (symbol) {
+        console.log(`[CANCEL ALL] Все ордера по ${symbol} отменены`);
+      } else {
+        console.log('[CANCEL ALL] Все ордера на аккаунте отменены');
+      }
+      return data; // { code: "200", msg: "success" }
+    } catch (error: any) {
+      console.error('[CANCEL ALL ERROR]', error?.code, error?.msg || error);
+      throw error;
+    }
+  }
+
   destroy() {
     this._destroy$.next();
     this._destroy$.complete();

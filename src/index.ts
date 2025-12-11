@@ -105,23 +105,24 @@ async function startTradingClient() {
     // await client.forceClosePosition(SYMBOL, 'LONG');
 
     const price = 95000;
-    const limitOrder = await client.limitOrder({
-      symbol: 'BTCUSDT',
-      side: 'SELL',
-      usdAmount: 800,
-      price,
-      positionSide: 'SHORT',
-    });
-    console.log(limitOrder.data.orderId);
-    await sleep(3000);
-
-    await client.modifyLimitOrder({
-      symbol: 'BTCUSDT',
-      side: 'SELL',
-      orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
-      newPrice: 105000,                         // опционально — можно изменить объём
-      qty: 800,
-    });
+    // const limitOrder = await client.limitOrder({
+    //   symbol: 'BTCUSDT',
+    //   side: 'SELL',
+    //   usdAmount: 800,
+    //   price,
+    //   positionSide: 'SHORT',
+    // });
+    // console.log(limitOrder.data.orderId);
+    // await sleep(3000);
+    // await client.cancelOrder({ symbol: 'BTCUSDT', orderId: limitOrder.data.orderId });
+    // await sleep(3000);
+    // await client.modifyLimitOrder({
+    //   symbol: 'BTCUSDT',
+    //   side: 'SELL',
+    //   orderId: limitOrder.data.orderId,   // ← используем clientOrderId из стратегии
+    //   newPrice: 105000,                         // опционально — можно изменить объём
+    //   qty: 800,
+    // });
     // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
     const strategy = await client.strategy({
       symbol: 'BTCUSDT',
@@ -133,15 +134,19 @@ async function startTradingClient() {
       positionSide: 'LONG',  // ← обязательно на тестнете!
     });
     console.log(strategy);
-    await sleep(5000);
+    await sleep(3000);
+    // await client.cancelOrder({ symbol: 'BTCUSDT', clientOrderId: strategy.entryOrderId });
+    // await client.cancelAlgoOrder(strategy.slAlgoId);
+    // await client.cancelAlgoOrder(strategy.tpAlgoId);
+    await client.cancelAllOrders('BTCUSDT');
 
-    await client.modifyLimitOrder({
-      symbol: 'BTCUSDT',
-      side: 'SELL',
-      orderId: strategy.entryOrderId,
-      newPrice: 86000,
-      qty: 1000,
-    });
+    // await client.modifyLimitOrder({
+    //   symbol: 'BTCUSDT',
+    //   side: 'SELL',
+    //   orderId: strategy.entryOrderId,
+    //   newPrice: 86000,
+    //   qty: 1000,
+    // });
     // Для TP
     // await client.modifyTP({
     //   symbol: 'BTCUSDT',
