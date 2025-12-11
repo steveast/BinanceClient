@@ -731,7 +731,7 @@ export class BinanceFuturesClient {
  *
  * @returns Объект с ID всех созданных ордеров и параметрами
  */
-  async limitOrderStrategy({
+  async strategy({
     symbol,
     side,
     usdAmount,

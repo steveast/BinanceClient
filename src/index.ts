@@ -123,7 +123,7 @@ async function startTradingClient() {
       qty: 800,
     });
     // Лонг от 60к с выходом по 61.5к и стопом на 59.5к
-    const strategy = await client.limitOrderStrategy({
+    const strategy = await client.strategy({
       symbol: 'BTCUSDT',
       side: 'BUY',
       usdAmount: 1000,
@@ -161,7 +161,7 @@ async function startTradingClient() {
     // });
 
     // // Шорт от текущей цены -3%
-    // await client.limitOrderStrategy({
+    // await client.strategy({
     //   symbol: 'BTCUSDT',
     //   side: 'SELL',
     //   usdAmount: 800,
